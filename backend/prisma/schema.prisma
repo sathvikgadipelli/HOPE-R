@@ -1,0 +1,57 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Civilian {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String   @unique
+  createdAt DateTime @default(now())
+  requests  EmergencyRequest[]
+}
+
+model Disaster {
+  id           Int      @id @default(autoincrement())
+  type         String
+  latitude     Float
+  longitude    Float
+  requestCount Int      @default(0)
+  people       Int      @default(0)
+  injured      Int      @default(0)
+  trapped      Int      @default(0)
+  priority     String   @default("MEDIUM")
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+  requests     EmergencyRequest[]
+  assignments  Assignment[]
+}
+
+model EmergencyRequest {
+  id          Int      @id @default(autoincrement())
+  type        String
+  description String?
+  latitude    Float
+  longitude   Float
+  people      Int      @default(1)
+  injured     Int      @default(0)
+  trapped     Int      @default(0)
+  createdAt   DateTime @default(now())
+  civilianId  Int
+  civilian    Civilian @relation(fields: [civilianId], references: [id])
+  disasterId  Int?
+  disaster    Disaster? @relation(fields: [disasterId], references: [id])
+}
+
+model Assignment {
+  id         Int      @id @default(autoincrement())
+  service    String
+  status     String   @default("ASSIGNED")
+  createdAt  DateTime @default(now())
+  disasterId Int
+  disaster   Disaster @relation(fields: [disasterId], references: [id])
+}
