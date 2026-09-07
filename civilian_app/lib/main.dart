@@ -16,25 +16,13 @@ void main() {
 // =========================================================
 
 class NetworkConfig {
-  static const int maxAttempts = 5;
-
-  static const Duration requestTimeout = Duration(seconds: 30);
-
+  static const Duration requestTimeout = Duration(seconds: 90);
   static const Duration locationTimeout = Duration(seconds: 20);
 
+  static const int maxRequestAttempts = 3;
+
   static Duration retryDelay(int attempt) {
-    switch (attempt) {
-      case 1:
-        return const Duration(seconds: 2);
-      case 2:
-        return const Duration(seconds: 4);
-      case 3:
-        return const Duration(seconds: 6);
-      case 4:
-        return const Duration(seconds: 8);
-      default:
-        return const Duration(seconds: 10);
-    }
+    return Duration(seconds: attempt * 3);
   }
 }
 
@@ -43,52 +31,59 @@ class NetworkConfig {
 // =========================================================
 
 class ApiService {
-  static Uri endpoint(String path) {
-    return Uri.parse('${apiBaseUrl()}$path');
-  }
-
-  static Map<String, String> get headers => const {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Cache-Control': 'no-cache',
-      };
-
-  static Future<http.Response> sendEmergencyRequest(
+  static Future<String> sendEmergencyRequest(
     String body,
   ) async {
     Object? lastError;
 
-    for (int attempt = 1; attempt <= NetworkConfig.maxAttempts; attempt++) {
+    for (
+      int attempt = 1;
+      attempt <= NetworkConfig.maxRequestAttempts;
+      attempt++
+    ) {
+      http.Client? client;
+
       try {
-        final response = await http
+        final uri = Uri.parse(
+          '${apiBaseUrl()}/requests',
+        );
+
+        client = http.Client();
+
+        final response = await client
             .post(
-              endpoint('/requests'),
-              headers: headers,
+              uri,
+              headers: const {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+              },
               body: body,
             )
-            .timeout(NetworkConfig.requestTimeout);
+            .timeout(
+              NetworkConfig.requestTimeout,
+            );
 
-        // 2xx = success.
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-          return response;
+        if (response.statusCode >= 200 &&
+            response.statusCode < 300) {
+          return response.body;
         }
 
-        // 4xx = request/client problem.
-        // Retrying the exact same request will not normally fix it.
-        if (response.statusCode >= 400 && response.statusCode < 500) {
-          return response;
+        if (response.statusCode >= 400 &&
+            response.statusCode < 500) {
+          return response.body;
         }
 
-        // 5xx = temporary server problem.
-        // Retry.
         lastError = Exception(
-          'Server returned ${response.statusCode}.',
+          'Response center returned HTTP '
+          '${response.statusCode}.',
         );
       } catch (e) {
         lastError = e;
+      } finally {
+        client?.close();
       }
 
-      if (attempt < NetworkConfig.maxAttempts) {
+      if (attempt < NetworkConfig.maxRequestAttempts) {
         await Future.delayed(
           NetworkConfig.retryDelay(attempt),
         );
@@ -96,12 +91,45 @@ class ApiService {
     }
 
     throw Exception(
-      'Unable to connect to the response center after '
-      '${NetworkConfig.maxAttempts} attempts. '
-      'Please check your internet connection and try again.',
+      'Unable to connect to the response center. '
+      '${_formatNetworkError(lastError)}',
+    );
+  }
+
+  static String _formatNetworkError(
+    Object? error,
+  ) {
+    if (error == null) {
+      return 'Please try again.';
+    }
+
+    final message = error.toString();
+
+    if (message.contains('Failed host lookup')) {
+      return 'The response server could not be found. '
+          'Please check your internet connection.';
+    }
+
+    if (message.contains('SocketException')) {
+      return 'Network connection failed. '
+          'Please check your internet connection.';
+    }
+
+    if (message.contains('TimeoutException')) {
+      return 'The response center is taking longer than expected. '
+          'Please try again.';
+    }
+
+    return message.replaceFirst(
+      'Exception: ',
+      '',
     );
   }
 }
+
+// =========================================================
+// APP
+// =========================================================
 
 class HopeRApp extends StatelessWidget {
   const HopeRApp({super.key});
@@ -125,9 +153,9 @@ class HopeRApp extends StatelessWidget {
   }
 }
 
-/* =========================================================
-   HOME SCREEN
-========================================================= */
+// =========================================================
+// HOME SCREEN
+// =========================================================
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -206,12 +234,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _cleanError(Object error) {
-    final message = error.toString();
-
-    return message.replaceFirst(
-      'Exception: ',
-      '',
-    );
+    return error
+        .toString()
+        .replaceFirst('Exception: ', '');
   }
 
   void openEmergencyRequest() {
@@ -428,7 +453,8 @@ class _HomeScreenState extends State<HomeScreen> {
               color: const Color(0xffd92d3d),
               boxShadow: [
                 BoxShadow(
-                  color: const Color(0xffd92d3d).withValues(alpha: 0.28),
+                  color: const Color(0xffd92d3d)
+                      .withValues(alpha: 0.28),
                   blurRadius: 35,
                   spreadRadius: 8,
                 ),
@@ -608,7 +634,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
                     children: [
                       Text(
                         item.$2,
@@ -638,9 +665,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/* =========================================================
-   EMERGENCY REQUEST SCREEN
-========================================================= */
+// =========================================================
+// EMERGENCY REQUEST SCREEN
+// =========================================================
 
 class EmergencyRequestScreen extends StatefulWidget {
   final Position? initialPosition;
@@ -651,10 +678,12 @@ class EmergencyRequestScreen extends StatefulWidget {
   });
 
   @override
-  State<EmergencyRequestScreen> createState() => _EmergencyRequestScreenState();
+  State<EmergencyRequestScreen> createState() =>
+      _EmergencyRequestScreenState();
 }
 
-class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
+class _EmergencyRequestScreenState
+    extends State<EmergencyRequestScreen> {
   final nameController = TextEditingController();
   final phoneController = TextEditingController();
   final detailsController = TextEditingController();
@@ -711,7 +740,8 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
         );
       }
 
-      final newPosition = await Geolocator.getCurrentPosition(
+      final newPosition =
+          await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
         ),
@@ -752,12 +782,9 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
   }
 
   String _cleanError(Object error) {
-    final message = error.toString();
-
-    return message.replaceFirst(
-      'Exception: ',
-      '',
-    );
+    return error
+        .toString()
+        .replaceFirst('Exception: ', '');
   }
 
   Future<void> sendRequest() async {
@@ -808,12 +835,13 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
     });
 
     try {
-      final response = await ApiService.sendEmergencyRequest(body);
+      final responseBody =
+          await ApiService.sendEmergencyRequest(body);
 
       Map<String, dynamic> data;
 
       try {
-        final decoded = jsonDecode(response.body);
+        final decoded = jsonDecode(responseBody);
 
         if (decoded is! Map) {
           throw Exception();
@@ -827,13 +855,10 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
         );
       }
 
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        final serverMessage = data['message']?.toString();
-
+      if (data['success'] != true) {
         throw Exception(
-          serverMessage != null && serverMessage.isNotEmpty
-              ? serverMessage
-              : 'Unable to send emergency request.',
+          data['message']?.toString() ??
+              'Emergency request could not be registered.',
         );
       }
 
@@ -913,7 +938,8 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
               child: Padding(
                 padding: const EdgeInsets.all(20),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
                   children: [
                     _progressHeader(),
                     const SizedBox(height: 22),
@@ -949,18 +975,23 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
                       width: double.infinity,
                       height: 58,
                       child: FilledButton.icon(
-                        onPressed: sending ? null : sendRequest,
+                        onPressed:
+                            sending ? null : sendRequest,
                         style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xffd92d3d),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
+                          backgroundColor:
+                              const Color(0xffd92d3d),
+                          shape:
+                              RoundedRectangleBorder(
+                            borderRadius:
+                                BorderRadius.circular(16),
                           ),
                         ),
                         icon: sending
                             ? const SizedBox(
                                 width: 20,
                                 height: 20,
-                                child: CircularProgressIndicator(
+                                child:
+                                    CircularProgressIndicator(
                                   color: Colors.white,
                                   strokeWidth: 2,
                                 ),
@@ -1037,7 +1068,8 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
     String subtitle,
   ) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
       children: [
         Text(
           title,
@@ -1061,10 +1093,12 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
 
   Widget _emergencyTypes() {
     final types = [
-      ('Medical Emergency', Icons.medical_services_rounded),
+      ('Medical Emergency',
+          Icons.medical_services_rounded),
       ('Fire', Icons.local_fire_department_rounded),
       ('Flood', Icons.water_rounded),
-      ('Building Collapse', Icons.domain_disabled_rounded),
+      ('Building Collapse',
+          Icons.domain_disabled_rounded),
       ('Road Accident', Icons.car_crash_rounded),
       ('Rescue Needed', Icons.sos_rounded),
       ('Other', Icons.more_horiz_rounded),
@@ -1083,14 +1117,19 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
             });
           },
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(
+            duration:
+                const Duration(milliseconds: 180),
+            padding:
+                const EdgeInsets.symmetric(
               horizontal: 14,
               vertical: 12,
             ),
             decoration: BoxDecoration(
-              color: selected ? const Color(0xff1456d9) : Colors.white,
-              borderRadius: BorderRadius.circular(14),
+              color: selected
+                  ? const Color(0xff1456d9)
+                  : Colors.white,
+              borderRadius:
+                  BorderRadius.circular(14),
               border: Border.all(
                 color: selected
                     ? const Color(0xff1456d9)
@@ -1103,13 +1142,17 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
                 Icon(
                   item.$2,
                   size: 18,
-                  color: selected ? Colors.white : const Color(0xff475467),
+                  color: selected
+                      ? Colors.white
+                      : const Color(0xff475467),
                 ),
                 const SizedBox(width: 7),
                 Text(
                   item.$1,
                   style: TextStyle(
-                    color: selected ? Colors.white : const Color(0xff344054),
+                    color: selected
+                        ? Colors.white
+                        : const Color(0xff344054),
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
                   ),
@@ -1130,8 +1173,10 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
         children: [
           TextField(
             controller: nameController,
-            textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(
+            textInputAction:
+                TextInputAction.next,
+            decoration:
+                const InputDecoration(
               labelText: 'Your name',
               prefixIcon: Icon(
                 Icons.person_outline_rounded,
@@ -1142,9 +1187,12 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
           const SizedBox(height: 12),
           TextField(
             controller: phoneController,
-            keyboardType: TextInputType.phone,
-            textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(
+            keyboardType:
+                TextInputType.phone,
+            textInputAction:
+                TextInputAction.next,
+            decoration:
+                const InputDecoration(
               labelText: 'Phone number',
               prefixIcon: Icon(
                 Icons.phone_outlined,
@@ -1156,9 +1204,12 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
           TextField(
             controller: detailsController,
             maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: 'Additional details (optional)',
-              hintText: 'Describe what is happening...',
+            decoration:
+                const InputDecoration(
+              labelText:
+                  'Additional details (optional)',
+              hintText:
+                  'Describe what is happening...',
               alignLabelWithHint: true,
               border: OutlineInputBorder(),
             ),
@@ -1170,7 +1221,8 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
 
   Widget _peopleCard() {
     return Container(
-      padding: const EdgeInsets.symmetric(
+      padding:
+          const EdgeInsets.symmetric(
         horizontal: 16,
         vertical: 8,
       ),
@@ -1240,7 +1292,9 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
             ),
           ),
           IconButton(
-            onPressed: value > 0 ? () => onChanged(value - 1) : null,
+            onPressed: value > 0
+                ? () => onChanged(value - 1)
+                : null,
             icon: const Icon(
               Icons.remove_circle_outline,
             ),
@@ -1258,7 +1312,8 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
             ),
           ),
           IconButton(
-            onPressed: () => onChanged(value + 1),
+            onPressed:
+                () => onChanged(value + 1),
             icon: const Icon(
               Icons.add_circle_outline,
             ),
@@ -1280,8 +1335,10 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
                 width: 45,
                 height: 45,
                 decoration: BoxDecoration(
-                  color: const Color(0xffeaf1ff),
-                  borderRadius: BorderRadius.circular(13),
+                  color:
+                      const Color(0xffeaf1ff),
+                  borderRadius:
+                      BorderRadius.circular(13),
                 ),
                 child: const Icon(
                   Icons.my_location_rounded,
@@ -1291,12 +1348,14 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
                   children: [
                     const Text(
                       'Current GPS location',
                       style: TextStyle(
-                        fontWeight: FontWeight.w800,
+                        fontWeight:
+                            FontWeight.w800,
                         fontSize: 13,
                       ),
                     ),
@@ -1320,12 +1379,14 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed: locating ? null : captureLocation,
+              onPressed:
+                  locating ? null : captureLocation,
               icon: locating
                   ? const SizedBox(
                       width: 17,
                       height: 17,
-                      child: CircularProgressIndicator(
+                      child:
+                          CircularProgressIndicator(
                         strokeWidth: 2,
                       ),
                     )
@@ -1357,9 +1418,9 @@ class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
   }
 }
 
-/* =========================================================
-   SUCCESS SCREEN
-========================================================= */
+// =========================================================
+// SUCCESS SCREEN
+// =========================================================
 
 class RequestSuccessScreen extends StatelessWidget {
   final dynamic requestId;
@@ -1376,13 +1437,15 @@ class RequestSuccessScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xfff5f7fb),
+      backgroundColor:
+          const Color(0xfff5f7fb),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(22),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(
+              constraints:
+                  const BoxConstraints(
                 maxWidth: 560,
               ),
               child: Column(
@@ -1390,7 +1453,8 @@ class RequestSuccessScreen extends StatelessWidget {
                   Container(
                     width: 92,
                     height: 92,
-                    decoration: const BoxDecoration(
+                    decoration:
+                        const BoxDecoration(
                       color: Color(0xffe9f8ef),
                       shape: BoxShape.circle,
                     ),
@@ -1405,7 +1469,8 @@ class RequestSuccessScreen extends StatelessWidget {
                     'REQUEST SENT',
                     style: TextStyle(
                       fontSize: 28,
-                      fontWeight: FontWeight.w900,
+                      fontWeight:
+                          FontWeight.w900,
                       color: Color(0xff101828),
                     ),
                   ),
@@ -1423,12 +1488,15 @@ class RequestSuccessScreen extends StatelessWidget {
                   const SizedBox(height: 28),
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(20),
+                    padding:
+                        const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius:
+                          BorderRadius.circular(20),
                       border: Border.all(
-                        color: const Color(0xffe4e7ec),
+                        color:
+                            const Color(0xffe4e7ec),
                       ),
                     ),
                     child: Column(
@@ -1436,9 +1504,11 @@ class RequestSuccessScreen extends StatelessWidget {
                         const Text(
                           'INCIDENT',
                           style: TextStyle(
-                            color: Color(0xff667085),
+                            color:
+                                Color(0xff667085),
                             fontSize: 11,
-                            fontWeight: FontWeight.w800,
+                            fontWeight:
+                                FontWeight.w800,
                             letterSpacing: 1,
                           ),
                         ),
@@ -1447,21 +1517,28 @@ class RequestSuccessScreen extends StatelessWidget {
                           '#$disasterId',
                           style: const TextStyle(
                             fontSize: 32,
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xff1456d9),
+                            fontWeight:
+                                FontWeight.w900,
+                            color:
+                                Color(0xff1456d9),
                           ),
                         ),
-                        const SizedBox(height: 20),
+                        const SizedBox(
+                          height: 20,
+                        ),
                         _statusRow(
-                          Icons.assignment_turned_in_rounded,
+                          Icons
+                              .assignment_turned_in_rounded,
                           'Request registered',
                         ),
                         _statusRow(
-                          Icons.location_on_rounded,
+                          Icons
+                              .location_on_rounded,
                           'Location received',
                         ),
                         _statusRow(
-                          Icons.account_balance_rounded,
+                          Icons
+                              .account_balance_rounded,
                           'Response center notified',
                         ),
                         const Divider(
@@ -1472,15 +1549,18 @@ class RequestSuccessScreen extends StatelessWidget {
                             const Text(
                               'Request ID',
                               style: TextStyle(
-                                color: Color(0xff667085),
+                                color:
+                                    Color(0xff667085),
                                 fontSize: 12,
                               ),
                             ),
                             const Spacer(),
                             Text(
                               '#$requestId',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w900,
+                              style:
+                                  const TextStyle(
+                                fontWeight:
+                                    FontWeight.w900,
                                 fontSize: 13,
                               ),
                             ),
@@ -1492,29 +1572,40 @@ class RequestSuccessScreen extends StatelessWidget {
                             const Text(
                               'Status',
                               style: TextStyle(
-                                color: Color(0xff667085),
+                                color:
+                                    Color(0xff667085),
                                 fontSize: 12,
                               ),
                             ),
                             const Spacer(),
                             Container(
-                              padding: const EdgeInsets.symmetric(
+                              padding:
+                                  const EdgeInsets
+                                      .symmetric(
                                 horizontal: 10,
                                 vertical: 5,
                               ),
-                              decoration: BoxDecoration(
-                                color: const Color(
+                              decoration:
+                                  BoxDecoration(
+                                color:
+                                    const Color(
                                   0xffe9f8ef,
                                 ),
-                                borderRadius: BorderRadius.circular(
+                                borderRadius:
+                                    BorderRadius
+                                        .circular(
                                   20,
                                 ),
                               ),
                               child: Text(
                                 '$action',
-                                style: const TextStyle(
-                                  color: Color(0xff159455),
-                                  fontWeight: FontWeight.w900,
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Color(0xff159455),
+                                  fontWeight:
+                                      FontWeight
+                                          .w900,
                                   fontSize: 11,
                                 ),
                               ),
@@ -1530,10 +1621,12 @@ class RequestSuccessScreen extends StatelessWidget {
                     height: 54,
                     child: FilledButton(
                       onPressed: () {
-                        Navigator.pushAndRemoveUntil(
+                        Navigator
+                            .pushAndRemoveUntil(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => const HomeScreen(),
+                            builder: (_) =>
+                                const HomeScreen(),
                           ),
                           (route) => false,
                         );
@@ -1541,7 +1634,8 @@ class RequestSuccessScreen extends StatelessWidget {
                       child: const Text(
                         'BACK TO HOME',
                         style: TextStyle(
-                          fontWeight: FontWeight.w900,
+                          fontWeight:
+                              FontWeight.w900,
                         ),
                       ),
                     ),
@@ -1560,7 +1654,8 @@ class RequestSuccessScreen extends StatelessWidget {
     String text,
   ) {
     return Padding(
-      padding: const EdgeInsets.symmetric(
+      padding:
+          const EdgeInsets.symmetric(
         vertical: 7,
       ),
       child: Row(
