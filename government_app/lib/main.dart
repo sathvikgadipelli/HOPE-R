@@ -1,17 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-String apiBaseUrl() {
-  if (kIsWeb) {
-    return 'http://127.0.0.1:3000';
-  }
+String apiBaseUrl() => 'https://hope-r-api.onrender.com';
 
-  return 'http://10.0.2.2:3000';
-}
+const Duration apiTimeout = Duration(seconds: 15);
+const int apiMaxAttempts = 5;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -78,28 +75,135 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
     loadData();
   }
 
-  Future<dynamic> getApi(String path) async {
-    final response = await http
-        .get(
+  // ------------------------------------------------------------
+  // ROBUST API GET
+  // ------------------------------------------------------------
+
+  Future<dynamic> getApi(
+    String path, {
+    int maxAttempts = apiMaxAttempts,
+  }) async {
+    Object? lastError;
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final response = await http.get(
           Uri.parse('${apiBaseUrl()}$path'),
-        )
-        .timeout(
-          const Duration(seconds: 8),
+          headers: const {
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache',
+          },
+        ).timeout(apiTimeout);
+
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          return jsonDecode(response.body);
+        }
+
+        lastError = Exception(
+          'Server returned ${response.statusCode}',
         );
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception(
-        'Server returned ${response.statusCode}',
-      );
+        // Server errors are worth retrying.
+        if (response.statusCode >= 500 && attempt < maxAttempts) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+
+        throw lastError;
+      } catch (e) {
+        lastError = e;
+
+        if (attempt >= maxAttempts) {
+          break;
+        }
+
+        await waitBeforeRetry(attempt);
+      }
     }
 
-    return jsonDecode(response.body);
+    throw lastError ?? Exception('Unable to reach HOPE-R server.');
   }
 
+  // ------------------------------------------------------------
+  // ROBUST API POST
+  // ------------------------------------------------------------
+
+  Future<dynamic> postApi(
+    String path, {
+    required Map<String, dynamic> body,
+    int maxAttempts = 3,
+  }) async {
+    Object? lastError;
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final response = await http
+            .post(
+              Uri.parse('${apiBaseUrl()}$path'),
+              headers: const {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+              },
+              body: jsonEncode(body),
+            )
+            .timeout(apiTimeout);
+
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          if (response.body.trim().isEmpty) {
+            return <String, dynamic>{};
+          }
+
+          return jsonDecode(response.body);
+        }
+
+        lastError = Exception(
+          'Server returned ${response.statusCode}',
+        );
+
+        if (response.statusCode >= 500 && attempt < maxAttempts) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+
+        throw lastError;
+      } catch (e) {
+        lastError = e;
+
+        if (attempt >= maxAttempts) {
+          break;
+        }
+
+        await waitBeforeRetry(attempt);
+      }
+    }
+
+    throw lastError ?? Exception('Unable to reach HOPE-R server.');
+  }
+
+  // ------------------------------------------------------------
+  // RETRY DELAY
+  // 2 sec → 4 sec → 6 sec → 8 sec
+  // ------------------------------------------------------------
+
+  Future<void> waitBeforeRetry(int attempt) async {
+    final seconds = attempt * 2;
+
+    if (!mounted) return;
+
+    await Future.delayed(
+      Duration(seconds: seconds),
+    );
+  }
+
+  // ------------------------------------------------------------
+  // LOAD DATA
+  // ------------------------------------------------------------
+
   Future<void> loadData({bool silent = false}) async {
-    if (loading == false && !silent && mounted) {
+    if (!silent && !loading && mounted) {
       setState(() {
         refreshing = true;
+        error = null;
       });
     }
 
@@ -138,57 +242,62 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
     }
   }
 
+  // ------------------------------------------------------------
+  // CLEAN ERROR MESSAGE
+  // ------------------------------------------------------------
+
   String cleanError(Object error) {
-    final text = error.toString();
+    final text = error.toString().toLowerCase();
 
-    if (text.contains('TimeoutException')) {
-      return 'HOPE-R server took too long to respond.';
+    if (text.contains('timeout')) {
+      return 'HOPE-R server is taking longer than usual. '
+          'Please try again.';
     }
 
-    if (text.contains('Failed host lookup')) {
-      return 'Unable to reach the HOPE-R server.';
+    if (text.contains('failed host lookup') ||
+        text.contains('socketfailed') ||
+        text.contains('no address associated with hostname')) {
+      return 'Network connection to HOPE-R could not be established. '
+          'Please check your internet connection and retry.';
     }
 
-    if (text.contains('ClientException')) {
-      return 'Unable to connect to the HOPE-R server.';
+    if (text.contains('connection refused') ||
+        text.contains('connection reset') ||
+        text.contains('connection closed')) {
+      return 'Connection to HOPE-R was interrupted. '
+          'Please retry.';
     }
 
-    return text.replaceFirst('Exception: ', '');
+    if (text.contains('500')) {
+      return 'HOPE-R server encountered a temporary error. '
+          'Please retry.';
+    }
+
+    return error.toString().replaceFirst('Exception: ', '');
   }
+
+  // ------------------------------------------------------------
+  // ASSIGN SERVICE
+  // ------------------------------------------------------------
 
   Future<void> assignService(
     int disasterId,
     String service,
   ) async {
     try {
-      final response = await http
-          .post(
-            Uri.parse(
-              '${apiBaseUrl()}/disasters/$disasterId/assign',
-            ),
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'service': service,
-            }),
-          )
-          .timeout(
-            const Duration(seconds: 8),
-          );
-
-      if (response.statusCode < 200 ||
-          response.statusCode >= 300) {
-        throw Exception(
-          'Assignment failed (${response.statusCode})',
-        );
-      }
+      await postApi(
+        '/disasters/$disasterId/assign',
+        body: {
+          'service': service,
+        },
+      );
 
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF087443),
           content: Text(
             '$service assigned to Incident #$disasterId',
           ),
@@ -203,7 +312,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
         SnackBar(
           behavior: SnackBarBehavior.floating,
           content: Text(
-            'Unable to assign $service',
+            'Unable to assign $service. Please retry.',
           ),
         ),
       );
@@ -250,9 +359,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
               ),
             ],
           ),
-          bottomNavigationBar: desktop
-              ? null
-              : buildMobileNavigation(),
+          bottomNavigationBar: desktop ? null : buildMobileNavigation(),
         );
       },
     );
@@ -312,8 +419,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                   SizedBox(width: 10),
                   Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           'Response Console',
@@ -415,9 +521,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
             vertical: 13,
           ),
           decoration: BoxDecoration(
-            color: selected
-                ? const Color(0xFFEAF1FF)
-                : Colors.transparent,
+            color: selected ? const Color(0xFFEAF1FF) : Colors.transparent,
             borderRadius: BorderRadius.circular(12),
           ),
           child: Row(
@@ -437,9 +541,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                     color: selected
                         ? const Color(0xFF155EEF)
                         : const Color(0xFF344054),
-                    fontWeight: selected
-                        ? FontWeight.w800
-                        : FontWeight.w600,
+                    fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
                     fontSize: 13,
                   ),
                 ),
@@ -459,9 +561,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                   child: Text(
                     '$badge',
                     style: TextStyle(
-                      color: selected
-                          ? Colors.white
-                          : const Color(0xFF667085),
+                      color: selected ? Colors.white : const Color(0xFF667085),
                       fontSize: 10,
                       fontWeight: FontWeight.w800,
                     ),
@@ -613,8 +713,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
             maxWidth: 1250,
           ),
           child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               buildHero(desktop),
               const SizedBox(height: 20),
@@ -624,8 +723,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                 children: [
                   const Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           'Active incidents',
@@ -661,14 +759,11 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
               if (disasters.isEmpty)
                 const EmptyState(
                   title: 'No active incidents',
-                  message:
-                      'New emergency requests will appear here.',
+                  message: 'New emergency requests will appear here.',
                   icon: Icons.shield_outlined,
                 )
               else
-                ...disasters
-                    .take(5)
-                    .map(buildIncidentCard),
+                ...disasters.take(5).map(buildIncidentCard),
             ],
           ),
         ),
@@ -697,8 +792,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
         children: [
           Expanded(
             child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -709,8 +803,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                     color: Colors.white.withValues(
                       alpha: 0.12,
                     ),
-                    borderRadius:
-                        BorderRadius.circular(30),
+                    borderRadius: BorderRadius.circular(30),
                   ),
                   child: const Text(
                     'NATIONAL RESPONSE NETWORK',
@@ -724,9 +817,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                 ),
                 const SizedBox(height: 15),
                 Text(
-                  desktop
-                      ? 'Command Center'
-                      : 'Response Command',
+                  desktop ? 'Command Center' : 'Response Command',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: desktop ? 34 : 27,
@@ -845,8 +936,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
             const SizedBox(width: 13),
             Expanded(
               child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     '$value',
@@ -884,8 +974,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
             maxWidth: 1250,
           ),
           child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               buildPageHeader(
                 'Active Incidents',
@@ -896,8 +985,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
               if (disasters.isEmpty)
                 const EmptyState(
                   title: 'No active incidents',
-                  message:
-                      'There are currently no active emergency incidents.',
+                  message: 'There are currently no active emergency incidents.',
                   icon: Icons.warning_amber_outlined,
                 )
               else
@@ -920,8 +1008,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
             maxWidth: 1250,
           ),
           child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               buildPageHeader(
                 'Emergency Requests',
@@ -932,8 +1019,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
               if (requests.isEmpty)
                 const EmptyState(
                   title: 'No emergency requests',
-                  message:
-                      'New civilian requests will appear here.',
+                  message: 'New civilian requests will appear here.',
                   icon: Icons.assignment_outlined,
                 )
               else
@@ -967,8 +1053,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
         const SizedBox(width: 13),
         Expanded(
           child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 title,
@@ -995,17 +1080,14 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
   Widget buildIncidentCard(dynamic disaster) {
     final id = disaster['id'];
     final type = '${disaster['type'] ?? 'Emergency'}';
-    final priority =
-        '${disaster['priority'] ?? 'MEDIUM'}';
+    final priority = '${disaster['priority'] ?? 'MEDIUM'}';
 
-    final requestCount =
-        disaster['requestCount'] ?? 0;
+    final requestCount = disaster['requestCount'] ?? 0;
     final people = disaster['people'] ?? 0;
     final injured = disaster['injured'] ?? 0;
     final trapped = disaster['trapped'] ?? 0;
 
-    final priorityInfo =
-        priorityStyle(priority);
+    final priorityInfo = priorityStyle(priority);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1033,8 +1115,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                     width: 44,
                     decoration: BoxDecoration(
                       color: const Color(0xFFFFF4ED),
-                      borderRadius:
-                          BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(12),
                     ),
                     child: const Icon(
                       Icons.warning_rounded,
@@ -1044,15 +1125,13 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           type,
                           style: const TextStyle(
                             fontSize: 17,
-                            fontWeight:
-                                FontWeight.w900,
+                            fontWeight: FontWeight.w900,
                           ),
                         ),
                         const SizedBox(height: 3),
@@ -1061,32 +1140,27 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
                           style: const TextStyle(
                             color: Color(0xFF667085),
                             fontSize: 12,
-                            fontWeight:
-                                FontWeight.w600,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ],
                     ),
                   ),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(
+                    padding: const EdgeInsets.symmetric(
                       horizontal: 10,
                       vertical: 6,
                     ),
                     decoration: BoxDecoration(
-                      color: priorityInfo.color
-                          .withValues(alpha: 0.10),
-                      borderRadius:
-                          BorderRadius.circular(30),
+                      color: priorityInfo.color.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(30),
                     ),
                     child: Text(
                       priority,
                       style: TextStyle(
                         color: priorityInfo.color,
                         fontSize: 10,
-                        fontWeight:
-                            FontWeight.w900,
+                        fontWeight: FontWeight.w900,
                       ),
                     ),
                   ),
@@ -1187,8 +1261,7 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
           const SizedBox(width: 6),
           Flexible(
             child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   value,
@@ -1226,28 +1299,23 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
   Widget buildRequestCard(dynamic request) {
     final civilian = request['civilian'];
 
-    final name =
-        civilian?['name'] ?? 'Civilian';
-    final phone =
-        civilian?['phone'] ?? 'No phone';
-    final type =
-        '${request['type'] ?? 'Emergency'}';
+    final name = civilian?['name'] ?? 'Civilian';
+    final phone = civilian?['phone'] ?? 'No phone';
+    final type = '${request['type'] ?? 'Emergency'}';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
               height: 42,
               width: 42,
               decoration: BoxDecoration(
                 color: const Color(0xFFEAF1FF),
-                borderRadius:
-                    BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(12),
               ),
               child: const Icon(
                 Icons.person_rounded,
@@ -1257,22 +1325,14 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
             const SizedBox(width: 12),
             Expanded(
               child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '$type • #${request['id']}',
-                          style: const TextStyle(
-                            fontWeight:
-                                FontWeight.w900,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ),
-                    ],
+                  Text(
+                    '$type • #${request['id']}',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 16,
+                    ),
                   ),
                   const SizedBox(height: 5),
                   Text(
@@ -1364,22 +1424,17 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
       destinations: const [
         NavigationDestination(
           icon: Icon(Icons.dashboard_outlined),
-          selectedIcon:
-              Icon(Icons.dashboard_rounded),
+          selectedIcon: Icon(Icons.dashboard_rounded),
           label: 'Home',
         ),
         NavigationDestination(
-          icon:
-              Icon(Icons.warning_amber_outlined),
-          selectedIcon:
-              Icon(Icons.warning_rounded),
+          icon: Icon(Icons.warning_amber_outlined),
+          selectedIcon: Icon(Icons.warning_rounded),
           label: 'Incidents',
         ),
         NavigationDestination(
-          icon:
-              Icon(Icons.assignment_outlined),
-          selectedIcon:
-              Icon(Icons.assignment_rounded),
+          icon: Icon(Icons.assignment_outlined),
+          selectedIcon: Icon(Icons.assignment_rounded),
           label: 'Requests',
         ),
       ],
@@ -1388,22 +1443,20 @@ class _GovernmentConsoleState extends State<GovernmentConsole> {
 
   ({Color color}) priorityStyle(String priority) {
     if (priority == 'CRITICAL') {
-      return (
-        color: const Color(0xFFD92D20),
-      );
+      return (color: const Color(0xFFD92D20),);
     }
 
     if (priority == 'HIGH') {
-      return (
-        color: const Color(0xFFDC6803),
-      );
+      return (color: const Color(0xFFDC6803),);
     }
 
-    return (
-      color: const Color(0xFF155EEF),
-    );
+    return (color: const Color(0xFF155EEF),);
   }
 }
+
+// ============================================================================
+// INCIDENT DETAIL PAGE
+// ============================================================================
 
 class IncidentDetailPage extends StatefulWidget {
   final dynamic disaster;
@@ -1420,12 +1473,10 @@ class IncidentDetailPage extends StatefulWidget {
   });
 
   @override
-  State<IncidentDetailPage> createState() =>
-      _IncidentDetailPageState();
+  State<IncidentDetailPage> createState() => _IncidentDetailPageState();
 }
 
-class _IncidentDetailPageState
-    extends State<IncidentDetailPage> {
+class _IncidentDetailPageState extends State<IncidentDetailPage> {
   String? assigningService;
 
   List<dynamic> get incidentRequests {
@@ -1463,16 +1514,11 @@ class _IncidentDetailPageState
 
   @override
   Widget build(BuildContext context) {
-    final latitude =
-        (widget.disaster['latitude'] as num)
-            .toDouble();
+    final latitude = (widget.disaster['latitude'] as num).toDouble();
 
-    final longitude =
-        (widget.disaster['longitude'] as num)
-            .toDouble();
+    final longitude = (widget.disaster['longitude'] as num).toDouble();
 
-    final priority =
-        '${widget.disaster['priority'] ?? 'MEDIUM'}';
+    final priority = '${widget.disaster['priority'] ?? 'MEDIUM'}';
 
     return Scaffold(
       backgroundColor: const Color(0xFFF6F8FC),
@@ -1486,8 +1532,7 @@ class _IncidentDetailPageState
       ),
       body: LayoutBuilder(
         builder: (context, constraints) {
-          final desktop =
-              constraints.maxWidth >= 950;
+          final desktop = constraints.maxWidth >= 950;
 
           return SingleChildScrollView(
             padding: EdgeInsets.all(
@@ -1499,8 +1544,7 @@ class _IncidentDetailPageState
                   maxWidth: 1200,
                 ),
                 child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     buildIncidentHeader(priority),
                     const SizedBox(height: 18),
@@ -1508,8 +1552,7 @@ class _IncidentDetailPageState
                     const SizedBox(height: 18),
                     if (desktop)
                       Row(
-                        crossAxisAlignment:
-                            CrossAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Expanded(
                             flex: 5,
@@ -1555,8 +1598,7 @@ class _IncidentDetailPageState
             : const Color(0xFF155EEF);
 
     return Row(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
           height: 54,
@@ -1574,8 +1616,7 @@ class _IncidentDetailPageState
         const SizedBox(width: 13),
         Expanded(
           child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 '${widget.disaster['type']}',
@@ -1670,8 +1711,7 @@ class _IncidentDetailPageState
         ),
         const SizedBox(width: 9),
         Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               value,
@@ -1701,8 +1741,7 @@ class _IncidentDetailPageState
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Padding(
             padding: EdgeInsets.fromLTRB(
@@ -1735,8 +1774,7 @@ class _IncidentDetailPageState
           Padding(
             padding: const EdgeInsets.all(15),
             child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
                   'EXACT GPS COORDINATES',
@@ -1791,8 +1829,7 @@ class _IncidentDetailPageState
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
               'Response Services',
@@ -1812,38 +1849,28 @@ class _IncidentDetailPageState
             const SizedBox(height: 15),
             ...services.map(
               (service) {
-                final busy =
-                    assigningService ==
-                        service.name;
+                final busy = assigningService == service.name;
 
                 return Padding(
-                  padding:
-                      const EdgeInsets.only(
+                  padding: const EdgeInsets.only(
                     bottom: 9,
                   ),
                   child: SizedBox(
                     width: double.infinity,
                     child: OutlinedButton(
-                      onPressed:
-                          assigningService != null
-                              ? null
-                              : () => assign(
-                                    service.name,
-                                  ),
-                      style:
-                          OutlinedButton.styleFrom(
-                        padding:
-                            const EdgeInsets
-                                .symmetric(
+                      onPressed: assigningService != null
+                          ? null
+                          : () => assign(
+                                service.name,
+                              ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
                           horizontal: 14,
                           vertical: 14,
                         ),
-                        alignment:
-                            Alignment.centerLeft,
-                        shape:
-                            RoundedRectangleBorder(
-                          borderRadius:
-                              BorderRadius.circular(
+                        alignment: Alignment.centerLeft,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(
                             12,
                           ),
                         ),
@@ -1858,10 +1885,8 @@ class _IncidentDetailPageState
                           Expanded(
                             child: Text(
                               service.name,
-                              style:
-                                  const TextStyle(
-                                fontWeight:
-                                    FontWeight.w800,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
                                 fontSize: 12,
                               ),
                             ),
@@ -1870,8 +1895,7 @@ class _IncidentDetailPageState
                             const SizedBox(
                               height: 17,
                               width: 17,
-                              child:
-                                  CircularProgressIndicator(
+                              child: CircularProgressIndicator(
                                 strokeWidth: 2,
                               ),
                             )
@@ -1902,8 +1926,7 @@ class _IncidentDetailPageState
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Row(
               children: [
@@ -1928,16 +1951,13 @@ class _IncidentDetailPageState
                   margin: const EdgeInsets.only(
                     bottom: 8,
                   ),
-                  padding:
-                      const EdgeInsets.symmetric(
+                  padding: const EdgeInsets.symmetric(
                     horizontal: 13,
                     vertical: 12,
                   ),
                   decoration: BoxDecoration(
-                    color:
-                        const Color(0xFFEAFBF0),
-                    borderRadius:
-                        BorderRadius.circular(12),
+                    color: const Color(0xFFEAFBF0),
+                    borderRadius: BorderRadius.circular(12),
                   ),
                   child: Row(
                     children: [
@@ -1950,10 +1970,8 @@ class _IncidentDetailPageState
                       Expanded(
                         child: Text(
                           '${assignment['service']}',
-                          style:
-                              const TextStyle(
-                            fontWeight:
-                                FontWeight.w800,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
                             fontSize: 12,
                           ),
                         ),
@@ -1963,8 +1981,7 @@ class _IncidentDetailPageState
                         style: TextStyle(
                           color: Color(0xFF087443),
                           fontSize: 10,
-                          fontWeight:
-                              FontWeight.w900,
+                          fontWeight: FontWeight.w900,
                         ),
                       ),
                     ],
@@ -1980,8 +1997,7 @@ class _IncidentDetailPageState
 
   Widget buildRequestsSection() {
     return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
           'Civilian Requests',
@@ -2002,8 +2018,7 @@ class _IncidentDetailPageState
         if (incidentRequests.isEmpty)
           const EmptyState(
             title: 'No underlying requests',
-            message:
-                'No individual requests were returned for this incident.',
+            message: 'No individual requests were returned for this incident.',
             icon: Icons.assignment_outlined,
           )
         else
@@ -2017,10 +2032,8 @@ class _IncidentDetailPageState
   Widget buildIncidentRequest(dynamic request) {
     final civilian = request['civilian'];
 
-    final name =
-        civilian?['name'] ?? 'Civilian';
-    final phone =
-        civilian?['phone'] ?? '';
+    final name = civilian?['name'] ?? 'Civilian';
+    final phone = civilian?['phone'] ?? '';
 
     return Card(
       margin: const EdgeInsets.only(
@@ -2029,8 +2042,7 @@ class _IncidentDetailPageState
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
@@ -2044,25 +2056,20 @@ class _IncidentDetailPageState
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         '$name',
-                        style:
-                            const TextStyle(
-                          fontWeight:
-                              FontWeight.w900,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w900,
                           fontSize: 14,
                         ),
                       ),
                       const SizedBox(height: 2),
                       Text(
                         '$phone',
-                        style:
-                            const TextStyle(
-                          color:
-                              Color(0xFF667085),
+                        style: const TextStyle(
+                          color: Color(0xFF667085),
                           fontSize: 11,
                         ),
                       ),
@@ -2070,8 +2077,7 @@ class _IncidentDetailPageState
                   ),
                 ),
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(
+                  padding: const EdgeInsets.symmetric(
                     horizontal: 8,
                     vertical: 5,
                   ),
@@ -2079,20 +2085,16 @@ class _IncidentDetailPageState
                     color: const Color(
                       0xFFEAF1FF,
                     ),
-                    borderRadius:
-                        BorderRadius.circular(
+                    borderRadius: BorderRadius.circular(
                       20,
                     ),
                   ),
                   child: Text(
                     '${request['type']}',
-                    style:
-                        const TextStyle(
-                      color:
-                          Color(0xFF155EEF),
+                    style: const TextStyle(
+                      color: Color(0xFF155EEF),
                       fontSize: 9,
-                      fontWeight:
-                          FontWeight.w900,
+                      fontWeight: FontWeight.w900,
                     ),
                   ),
                 ),
@@ -2168,6 +2170,10 @@ class _IncidentDetailPageState
   }
 }
 
+// ============================================================================
+// MAP PREVIEW
+// ============================================================================
+
 class MapPreview extends StatelessWidget {
   final double latitude;
   final double longitude;
@@ -2187,11 +2193,9 @@ class MapPreview extends StatelessWidget {
       zoom,
     );
 
-    final x = ((longitude + 180) / 360 * n)
-        .floor();
+    final x = ((longitude + 180) / 360 * n).floor();
 
-    final latitudeRad =
-        latitude * math.pi / 180;
+    final latitudeRad = latitude * math.pi / 180;
 
     final y = ((1 -
                 (math.log(
@@ -2208,8 +2212,7 @@ class MapPreview extends StatelessWidget {
             n)
         .floor();
 
-    final tileUrl =
-        'https://tile.openstreetmap.org/'
+    final tileUrl = 'https://tile.openstreetmap.org/'
         '$zoom/$x/$y.png';
 
     return SizedBox(
@@ -2222,8 +2225,7 @@ class MapPreview extends StatelessWidget {
             tileUrl,
             fit: BoxFit.cover,
             filterQuality: FilterQuality.low,
-            loadingBuilder:
-                (
+            loadingBuilder: (
               context,
               child,
               loadingProgress,
@@ -2236,14 +2238,12 @@ class MapPreview extends StatelessWidget {
                 color: const Color(0xFFF2F4F7),
                 alignment: Alignment.center,
                 child: const Column(
-                  mainAxisSize:
-                      MainAxisSize.min,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     SizedBox(
                       height: 22,
                       width: 22,
-                      child:
-                          CircularProgressIndicator(
+                      child: CircularProgressIndicator(
                         strokeWidth: 2,
                       ),
                     ),
@@ -2252,16 +2252,14 @@ class MapPreview extends StatelessWidget {
                       'Loading map...',
                       style: TextStyle(
                         fontSize: 11,
-                        color:
-                            Color(0xFF667085),
+                        color: Color(0xFF667085),
                       ),
                     ),
                   ],
                 ),
               );
             },
-            errorBuilder:
-                (
+            errorBuilder: (
               context,
               error,
               stackTrace,
@@ -2270,8 +2268,7 @@ class MapPreview extends StatelessWidget {
                 color: const Color(0xFFF2F4F7),
                 alignment: Alignment.center,
                 child: const Column(
-                  mainAxisSize:
-                      MainAxisSize.min,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
                       Icons.map_outlined,
@@ -2282,8 +2279,7 @@ class MapPreview extends StatelessWidget {
                     Text(
                       'Map preview unavailable',
                       style: TextStyle(
-                        color:
-                            Color(0xFF667085),
+                        color: Color(0xFF667085),
                         fontSize: 11,
                       ),
                     ),
@@ -2321,16 +2317,13 @@ class MapPreview extends StatelessWidget {
             left: 12,
             bottom: 12,
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(
+              padding: const EdgeInsets.symmetric(
                 horizontal: 10,
                 vertical: 7,
               ),
               decoration: BoxDecoration(
-                color: Colors.white
-                    .withValues(alpha: 0.94),
-                borderRadius:
-                    BorderRadius.circular(9),
+                color: Colors.white.withValues(alpha: 0.94),
+                borderRadius: BorderRadius.circular(9),
               ),
               child: Text(
                 '${latitude.toStringAsFixed(5)}, '
@@ -2347,6 +2340,10 @@ class MapPreview extends StatelessWidget {
     );
   }
 }
+
+// ============================================================================
+// LOADING
+// ============================================================================
 
 class LoadingView extends StatelessWidget {
   const LoadingView({super.key});
@@ -2386,6 +2383,10 @@ class LoadingView extends StatelessWidget {
   }
 }
 
+// ============================================================================
+// ERROR
+// ============================================================================
+
 class ErrorView extends StatelessWidget {
   final String message;
   final Future<void> Function() onRetry;
@@ -2418,8 +2419,7 @@ class ErrorView extends StatelessWidget {
                       color: const Color(
                         0xFFFFF4ED,
                       ),
-                      borderRadius:
-                          BorderRadius.circular(17),
+                      borderRadius: BorderRadius.circular(17),
                     ),
                     child: const Icon(
                       Icons.cloud_off_rounded,
@@ -2464,6 +2464,10 @@ class ErrorView extends StatelessWidget {
     );
   }
 }
+
+// ============================================================================
+// EMPTY STATE
+// ============================================================================
 
 class EmptyState extends StatelessWidget {
   final String title;

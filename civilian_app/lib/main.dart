@@ -1,20 +1,106 @@
+import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 
-String apiBaseUrl() {
-  if (kIsWeb) {
-    return 'http://127.0.0.1:3000';
-  }
-
-  return 'http://10.0.2.2:3000';
-}
+String apiBaseUrl() => 'https://hope-r-api.onrender.com';
 
 void main() {
   runApp(const HopeRApp());
+}
+
+// =========================================================
+// NETWORK CONFIGURATION
+// =========================================================
+
+class NetworkConfig {
+  static const int maxAttempts = 5;
+
+  static const Duration requestTimeout = Duration(seconds: 30);
+
+  static const Duration locationTimeout = Duration(seconds: 20);
+
+  static Duration retryDelay(int attempt) {
+    switch (attempt) {
+      case 1:
+        return const Duration(seconds: 2);
+      case 2:
+        return const Duration(seconds: 4);
+      case 3:
+        return const Duration(seconds: 6);
+      case 4:
+        return const Duration(seconds: 8);
+      default:
+        return const Duration(seconds: 10);
+    }
+  }
+}
+
+// =========================================================
+// API SERVICE
+// =========================================================
+
+class ApiService {
+  static Uri endpoint(String path) {
+    return Uri.parse('${apiBaseUrl()}$path');
+  }
+
+  static Map<String, String> get headers => const {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache',
+      };
+
+  static Future<http.Response> sendEmergencyRequest(
+    String body,
+  ) async {
+    Object? lastError;
+
+    for (int attempt = 1; attempt <= NetworkConfig.maxAttempts; attempt++) {
+      try {
+        final response = await http
+            .post(
+              endpoint('/requests'),
+              headers: headers,
+              body: body,
+            )
+            .timeout(NetworkConfig.requestTimeout);
+
+        // 2xx = success.
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          return response;
+        }
+
+        // 4xx = request/client problem.
+        // Retrying the exact same request will not normally fix it.
+        if (response.statusCode >= 400 && response.statusCode < 500) {
+          return response;
+        }
+
+        // 5xx = temporary server problem.
+        // Retry.
+        lastError = Exception(
+          'Server returned ${response.statusCode}.',
+        );
+      } catch (e) {
+        lastError = e;
+      }
+
+      if (attempt < NetworkConfig.maxAttempts) {
+        await Future.delayed(
+          NetworkConfig.retryDelay(attempt),
+        );
+      }
+    }
+
+    throw Exception(
+      'Unable to connect to the response center after '
+      '${NetworkConfig.maxAttempts} attempts. '
+      'Please check your internet connection and try again.',
+    );
+  }
 }
 
 class HopeRApp extends StatelessWidget {
@@ -55,13 +141,17 @@ class _HomeScreenState extends State<HomeScreen> {
   bool locating = false;
 
   Future<void> captureLocation() async {
+    if (locating) return;
+
     setState(() {
       locating = true;
     });
 
     try {
       if (!await Geolocator.isLocationServiceEnabled()) {
-        throw Exception('Please turn on location services.');
+        throw Exception(
+          'Please turn on location services.',
+        );
       }
 
       var permission = await Geolocator.checkPermission();
@@ -72,10 +162,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        throw Exception('Location permission is required.');
+        throw Exception(
+          'Location permission is required.',
+        );
       }
 
-      position = await Geolocator.getCurrentPosition();
+      position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      ).timeout(
+        NetworkConfig.locationTimeout,
+      );
 
       if (!mounted) return;
 
@@ -83,7 +181,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Current location captured successfully.'),
+          content: Text(
+            'Current location captured successfully.',
+          ),
         ),
       );
     } catch (e) {
@@ -92,7 +192,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            e.toString().replaceFirst('Exception: ', ''),
+            _cleanError(e),
           ),
         ),
       );
@@ -103,6 +203,15 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     }
+  }
+
+  String _cleanError(Object error) {
+    final message = error.toString();
+
+    return message.replaceFirst(
+      'Exception: ',
+      '',
+    );
   }
 
   void openEmergencyRequest() {
@@ -138,25 +247,15 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Column(
                       children: [
                         _topBar(),
-
                         const SizedBox(height: 28),
-
                         _heroSection(),
-
                         const SizedBox(height: 28),
-
                         _emergencyButton(),
-
                         const SizedBox(height: 28),
-
                         _locationCard(),
-
                         const SizedBox(height: 24),
-
                         _infoCards(wide),
-
                         const SizedBox(height: 30),
-
                         const Text(
                           'HOPE-R Emergency Response',
                           style: TextStyle(
@@ -165,9 +264,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-
                         const SizedBox(height: 6),
-
                         const Text(
                           'One request can help coordinate an entire incident.',
                           style: TextStyle(
@@ -293,9 +390,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-
           const SizedBox(height: 22),
-
           const Text(
             'When every second matters.',
             style: TextStyle(
@@ -305,9 +400,7 @@ class _HomeScreenState extends State<HomeScreen> {
               fontWeight: FontWeight.w900,
             ),
           ),
-
           const SizedBox(height: 11),
-
           const Text(
             'Send an emergency request and share your location '
             'with the response authorities.',
@@ -373,9 +466,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
-
         const SizedBox(height: 18),
-
         const Text(
           'REQUEST EMERGENCY HELP',
           style: TextStyle(
@@ -385,9 +476,7 @@ class _HomeScreenState extends State<HomeScreen> {
             letterSpacing: 0.5,
           ),
         ),
-
         const SizedBox(height: 6),
-
         const Text(
           'Tap the button to create an emergency request',
           style: TextStyle(
@@ -432,9 +521,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   : const Color(0xff1456d9),
             ),
           ),
-
           const SizedBox(width: 13),
-
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -461,7 +548,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-
           TextButton(
             onPressed: locating ? null : captureLocation,
             child: Text(
@@ -565,12 +651,10 @@ class EmergencyRequestScreen extends StatefulWidget {
   });
 
   @override
-  State<EmergencyRequestScreen> createState() =>
-      _EmergencyRequestScreenState();
+  State<EmergencyRequestScreen> createState() => _EmergencyRequestScreenState();
 }
 
-class _EmergencyRequestScreenState
-    extends State<EmergencyRequestScreen> {
+class _EmergencyRequestScreenState extends State<EmergencyRequestScreen> {
   final nameController = TextEditingController();
   final phoneController = TextEditingController();
   final detailsController = TextEditingController();
@@ -601,13 +685,17 @@ class _EmergencyRequestScreenState
   }
 
   Future<void> captureLocation() async {
+    if (locating) return;
+
     setState(() {
       locating = true;
     });
 
     try {
       if (!await Geolocator.isLocationServiceEnabled()) {
-        throw Exception('Please turn on location services.');
+        throw Exception(
+          'Please turn on location services.',
+        );
       }
 
       var permission = await Geolocator.checkPermission();
@@ -618,21 +706,39 @@ class _EmergencyRequestScreenState
 
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        throw Exception('Location permission is required.');
+        throw Exception(
+          'Location permission is required.',
+        );
       }
 
-      position = await Geolocator.getCurrentPosition();
+      final newPosition = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      ).timeout(
+        NetworkConfig.locationTimeout,
+      );
 
-      if (mounted) {
-        setState(() {});
-      }
+      if (!mounted) return;
+
+      setState(() {
+        position = newPosition;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Current location captured successfully.',
+          ),
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            e.toString().replaceFirst('Exception: ', ''),
+            _cleanError(e),
           ),
         ),
       );
@@ -645,50 +751,100 @@ class _EmergencyRequestScreenState
     }
   }
 
+  String _cleanError(Object error) {
+    final message = error.toString();
+
+    return message.replaceFirst(
+      'Exception: ',
+      '',
+    );
+  }
+
   Future<void> sendRequest() async {
-    if (nameController.text.trim().isEmpty) {
+    if (sending) return;
+
+    final name = nameController.text.trim();
+    final phone = phoneController.text.trim();
+    final details = detailsController.text.trim();
+
+    if (name.isEmpty) {
       _error('Please enter your name.');
       return;
     }
 
-    if (phoneController.text.trim().isEmpty) {
+    if (phone.isEmpty) {
       _error('Please enter your phone number.');
       return;
     }
 
-    if (position == null) {
-      _error('Please capture your current location.');
+    if (phone.length < 10) {
+      _error('Please enter a valid phone number.');
       return;
     }
+
+    if (position == null) {
+      _error(
+        'Please capture your current location.',
+      );
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
 
     setState(() {
       sending = true;
     });
 
+    final body = jsonEncode({
+      'name': name,
+      'phone': phone,
+      'type': type,
+      'description': details,
+      'latitude': position!.latitude,
+      'longitude': position!.longitude,
+      'people': people,
+      'injured': injured,
+      'trapped': trapped,
+    });
+
     try {
-      final response = await http.post(
-        Uri.parse('${apiBaseUrl()}/requests'),
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'name': nameController.text.trim(),
-          'phone': phoneController.text.trim(),
-          'type': type,
-          'description': detailsController.text.trim(),
-          'latitude': position!.latitude,
-          'longitude': position!.longitude,
-          'people': people,
-          'injured': injured,
-          'trapped': trapped,
-        }),
-      );
+      final response = await ApiService.sendEmergencyRequest(body);
 
-      final data = jsonDecode(response.body);
+      Map<String, dynamic> data;
 
-      if (response.statusCode >= 300) {
+      try {
+        final decoded = jsonDecode(response.body);
+
+        if (decoded is! Map) {
+          throw Exception();
+        }
+
+        data = Map<String, dynamic>.from(decoded);
+      } catch (_) {
         throw Exception(
-          data['message'] ?? 'Unable to send request.',
+          'Response center returned an invalid response. '
+          'Please try again.',
+        );
+      }
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final serverMessage = data['message']?.toString();
+
+        throw Exception(
+          serverMessage != null && serverMessage.isNotEmpty
+              ? serverMessage
+              : 'Unable to send emergency request.',
+        );
+      }
+
+      final requestId = data['requestId'];
+      final disasterId = data['disasterId'];
+      final action = data['action'];
+
+      if (requestId == null || disasterId == null) {
+        throw Exception(
+          'Emergency request was received, but '
+          'the response was incomplete.',
         );
       }
 
@@ -698,9 +854,9 @@ class _EmergencyRequestScreenState
         context,
         MaterialPageRoute(
           builder: (_) => RequestSuccessScreen(
-            requestId: data['requestId'],
-            disasterId: data['disasterId'],
-            action: data['action'],
+            requestId: requestId,
+            disasterId: disasterId,
+            action: action ?? 'RECEIVED',
           ),
         ),
       );
@@ -710,8 +866,10 @@ class _EmergencyRequestScreenState
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            e.toString().replaceFirst('Exception: ', ''),
+            _cleanError(e),
           ),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
         ),
       );
     } finally {
@@ -725,7 +883,10 @@ class _EmergencyRequestScreenState
 
   void _error(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
 
@@ -755,73 +916,51 @@ class _EmergencyRequestScreenState
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _progressHeader(),
-
                     const SizedBox(height: 22),
-
                     _sectionTitle(
                       'What happened?',
                       'Select the emergency type.',
                     ),
-
                     const SizedBox(height: 12),
-
                     _emergencyTypes(),
-
                     const SizedBox(height: 26),
-
                     _sectionTitle(
                       'Your details',
                       'Help responders identify and contact you.',
                     ),
-
                     const SizedBox(height: 12),
-
                     _detailsCard(),
-
                     const SizedBox(height: 26),
-
                     _sectionTitle(
                       'People affected',
                       'Provide the best estimate you can.',
                     ),
-
                     const SizedBox(height: 12),
-
                     _peopleCard(),
-
                     const SizedBox(height: 26),
-
                     _sectionTitle(
                       'Emergency location',
                       'Your GPS location is used to coordinate response.',
                     ),
-
                     const SizedBox(height: 12),
-
                     _locationCard(),
-
                     const SizedBox(height: 26),
-
                     SizedBox(
                       width: double.infinity,
                       height: 58,
                       child: FilledButton.icon(
-                        onPressed:
-                            sending ? null : sendRequest,
+                        onPressed: sending ? null : sendRequest,
                         style: FilledButton.styleFrom(
-                          backgroundColor:
-                              const Color(0xffd92d3d),
+                          backgroundColor: const Color(0xffd92d3d),
                           shape: RoundedRectangleBorder(
-                            borderRadius:
-                                BorderRadius.circular(16),
+                            borderRadius: BorderRadius.circular(16),
                           ),
                         ),
                         icon: sending
                             ? const SizedBox(
                                 width: 20,
                                 height: 20,
-                                child:
-                                    CircularProgressIndicator(
+                                child: CircularProgressIndicator(
                                   color: Colors.white,
                                   strokeWidth: 2,
                                 ),
@@ -831,7 +970,7 @@ class _EmergencyRequestScreenState
                               ),
                         label: Text(
                           sending
-                              ? 'SENDING REQUEST...'
+                              ? 'CONNECTING TO RESPONSE CENTER...'
                               : 'SEND EMERGENCY REQUEST',
                           style: const TextStyle(
                             fontWeight: FontWeight.w900,
@@ -839,19 +978,17 @@ class _EmergencyRequestScreenState
                         ),
                       ),
                     ),
-
                     const SizedBox(height: 12),
-
                     const Center(
                       child: Text(
-                        'Your request will be sent to the response center.',
+                        'Your request will be securely sent to the response center.',
+                        textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Color(0xff667085),
                           fontSize: 11,
                         ),
                       ),
                     ),
-
                     const SizedBox(height: 30),
                   ],
                 ),
@@ -895,7 +1032,10 @@ class _EmergencyRequestScreenState
     );
   }
 
-  Widget _sectionTitle(String title, String subtitle) {
+  Widget _sectionTitle(
+    String title,
+    String subtitle,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -949,9 +1089,7 @@ class _EmergencyRequestScreenState
               vertical: 12,
             ),
             decoration: BoxDecoration(
-              color: selected
-                  ? const Color(0xff1456d9)
-                  : Colors.white,
+              color: selected ? const Color(0xff1456d9) : Colors.white,
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
                 color: selected
@@ -965,17 +1103,13 @@ class _EmergencyRequestScreenState
                 Icon(
                   item.$2,
                   size: 18,
-                  color: selected
-                      ? Colors.white
-                      : const Color(0xff475467),
+                  color: selected ? Colors.white : const Color(0xff475467),
                 ),
                 const SizedBox(width: 7),
                 Text(
                   item.$1,
                   style: TextStyle(
-                    color: selected
-                        ? Colors.white
-                        : const Color(0xff344054),
+                    color: selected ? Colors.white : const Color(0xff344054),
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
                   ),
@@ -996,34 +1130,35 @@ class _EmergencyRequestScreenState
         children: [
           TextField(
             controller: nameController,
+            textInputAction: TextInputAction.next,
             decoration: const InputDecoration(
               labelText: 'Your name',
-              prefixIcon: Icon(Icons.person_outline_rounded),
+              prefixIcon: Icon(
+                Icons.person_outline_rounded,
+              ),
               border: OutlineInputBorder(),
             ),
           ),
-
           const SizedBox(height: 12),
-
           TextField(
             controller: phoneController,
             keyboardType: TextInputType.phone,
+            textInputAction: TextInputAction.next,
             decoration: const InputDecoration(
               labelText: 'Phone number',
-              prefixIcon: Icon(Icons.phone_outlined),
+              prefixIcon: Icon(
+                Icons.phone_outlined,
+              ),
               border: OutlineInputBorder(),
             ),
           ),
-
           const SizedBox(height: 12),
-
           TextField(
             controller: detailsController,
             maxLines: 4,
             decoration: const InputDecoration(
               labelText: 'Additional details (optional)',
-              hintText:
-                  'Describe what is happening...',
+              hintText: 'Describe what is happening...',
               alignLabelWithHint: true,
               border: OutlineInputBorder(),
             ),
@@ -1105,9 +1240,7 @@ class _EmergencyRequestScreenState
             ),
           ),
           IconButton(
-            onPressed: value > 0
-                ? () => onChanged(value - 1)
-                : null,
+            onPressed: value > 0 ? () => onChanged(value - 1) : null,
             icon: const Icon(
               Icons.remove_circle_outline,
             ),
@@ -1148,8 +1281,7 @@ class _EmergencyRequestScreenState
                 height: 45,
                 decoration: BoxDecoration(
                   color: const Color(0xffeaf1ff),
-                  borderRadius:
-                      BorderRadius.circular(13),
+                  borderRadius: BorderRadius.circular(13),
                 ),
                 child: const Icon(
                   Icons.my_location_rounded,
@@ -1159,8 +1291,7 @@ class _EmergencyRequestScreenState
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
                       'Current GPS location',
@@ -1185,14 +1316,11 @@ class _EmergencyRequestScreenState
               ),
             ],
           ),
-
           const SizedBox(height: 13),
-
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed:
-                  locating ? null : captureLocation,
+              onPressed: locating ? null : captureLocation,
               icon: locating
                   ? const SizedBox(
                       width: 17,
@@ -1262,8 +1390,8 @@ class RequestSuccessScreen extends StatelessWidget {
                   Container(
                     width: 92,
                     height: 92,
-                    decoration: BoxDecoration(
-                      color: const Color(0xffe9f8ef),
+                    decoration: const BoxDecoration(
+                      color: Color(0xffe9f8ef),
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(
@@ -1272,9 +1400,7 @@ class RequestSuccessScreen extends StatelessWidget {
                       size: 55,
                     ),
                   ),
-
                   const SizedBox(height: 24),
-
                   const Text(
                     'REQUEST SENT',
                     style: TextStyle(
@@ -1283,9 +1409,7 @@ class RequestSuccessScreen extends StatelessWidget {
                       color: Color(0xff101828),
                     ),
                   ),
-
                   const SizedBox(height: 8),
-
                   const Text(
                     'Your emergency request has reached '
                     'the response center.',
@@ -1296,16 +1420,13 @@ class RequestSuccessScreen extends StatelessWidget {
                       height: 1.5,
                     ),
                   ),
-
                   const SizedBox(height: 28),
-
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      borderRadius:
-                          BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(20),
                       border: Border.all(
                         color: const Color(0xffe4e7ec),
                       ),
@@ -1321,9 +1442,7 @@ class RequestSuccessScreen extends StatelessWidget {
                             letterSpacing: 1,
                           ),
                         ),
-
                         const SizedBox(height: 6),
-
                         Text(
                           '#$disasterId',
                           style: const TextStyle(
@@ -1332,26 +1451,22 @@ class RequestSuccessScreen extends StatelessWidget {
                             color: Color(0xff1456d9),
                           ),
                         ),
-
                         const SizedBox(height: 20),
-
                         _statusRow(
                           Icons.assignment_turned_in_rounded,
                           'Request registered',
                         ),
-
                         _statusRow(
                           Icons.location_on_rounded,
                           'Location received',
                         ),
-
                         _statusRow(
                           Icons.account_balance_rounded,
                           'Response center notified',
                         ),
-
-                        const Divider(height: 28),
-
+                        const Divider(
+                          height: 28,
+                        ),
                         Row(
                           children: [
                             const Text(
@@ -1371,9 +1486,7 @@ class RequestSuccessScreen extends StatelessWidget {
                             ),
                           ],
                         ),
-
                         const SizedBox(height: 10),
-
                         Row(
                           children: [
                             const Text(
@@ -1385,15 +1498,17 @@ class RequestSuccessScreen extends StatelessWidget {
                             ),
                             const Spacer(),
                             Container(
-                              padding:
-                                  const EdgeInsets.symmetric(
+                              padding: const EdgeInsets.symmetric(
                                 horizontal: 10,
                                 vertical: 5,
                               ),
                               decoration: BoxDecoration(
-                                color: const Color(0xffe9f8ef),
-                                borderRadius:
-                                    BorderRadius.circular(20),
+                                color: const Color(
+                                  0xffe9f8ef,
+                                ),
+                                borderRadius: BorderRadius.circular(
+                                  20,
+                                ),
                               ),
                               child: Text(
                                 '$action',
@@ -1409,9 +1524,7 @@ class RequestSuccessScreen extends StatelessWidget {
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 25),
-
                   SizedBox(
                     width: double.infinity,
                     height: 54,
@@ -1420,8 +1533,7 @@ class RequestSuccessScreen extends StatelessWidget {
                         Navigator.pushAndRemoveUntil(
                           context,
                           MaterialPageRoute(
-                            builder: (_) =>
-                                const HomeScreen(),
+                            builder: (_) => const HomeScreen(),
                           ),
                           (route) => false,
                         );
